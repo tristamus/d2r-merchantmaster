@@ -95,11 +95,6 @@
             background: rgba(212, 168, 75, 0.05)
         }
 
-        .search-wrap {
-            position: relative;
-            margin: 30px 0 20px
-        }
-
         #searchInput {
             width: 100%;
             padding: 16px 20px 16px 48px;
@@ -140,6 +135,47 @@
 
         #catalogStatus.error {
             color: var(--red2)
+        }
+
+        .catalog-loading {
+            text-align: center;
+            padding: 30px 0;
+        }
+
+        .catalog-loading .spinner {
+            display: inline-block;
+            width: 28px;
+            height: 28px;
+            border: 2px solid var(--border);
+            border-top-color: var(--gold);
+            border-radius: 50%;
+            animation: spin 0.8s linear infinite;
+            margin-bottom: 12px
+        }
+
+        .catalog-loading .load-text {
+            font-size: 0.85rem;
+            color: var(--text2);
+            letter-spacing: 1px
+        }
+
+        .catalog-loading .load-sub {
+            font-size: 0.7rem;
+            color: #555;
+            margin-top: 6px
+        }
+
+        .search-wrap {
+            position: relative;
+            margin: 30px 0 20px
+        }
+
+        .search-wrap.hidden {
+            display: none
+        }
+
+        .search-wrap.reveal {
+            animation: fadeIn 0.5s ease
         }
 
         .results-dropdown {
@@ -426,13 +462,18 @@
             <div class="subtitle">Diablo II: Resurrected — Item Value Checker</div>
             <div class="mode-badge">Non-Ladder · Softcore · PC</div>
         </header>
-        <div id="catalogStatus">Loading item catalog...</div>
-        <div class="search-wrap">
+        <div id="catalogLoading" class="catalog-loading">
+            <div class="spinner"></div>
+            <div class="load-text">Loading item catalog…</div>
+            <div class="load-sub">Fetching latest prices from d2trader.net</div>
+        </div>
+        <div class="search-wrap hidden" id="searchWrap">
             <span class="search-icon">🔍</span>
             <input type="text" id="searchInput" placeholder="Search for an item... (e.g. Enigma, Grief, Jah)"
-                autocomplete="off" disabled>
+                autocomplete="off">
             <div class="results-dropdown" id="dropdown"></div>
         </div>
+        <div id="catalogStatus" style="display:none"></div>
         <div id="priceCard" class="price-card"></div>
         <footer id="footerInfo">Prices sourced from d2trader.net (d2jsp FG) · Updated in real-time</footer>
     </div>
@@ -600,15 +641,22 @@
                     ITEMS = [...ROTW_ITEMS, ...RUNES, ...dynamicItems];
                 }
 
+                document.getElementById('catalogLoading').style.display = 'none';
+                const wrap = document.getElementById('searchWrap');
+                wrap.classList.remove('hidden');
+                wrap.classList.add('reveal');
+                statusEl.style.display = 'block';
                 statusEl.textContent = ITEMS.length + ' items loaded';
                 setTimeout(() => statusEl.style.opacity = '0', 2000);
-                searchEl.disabled = false;
-                searchEl.placeholder = 'Search for an item... (e.g. Enigma, Grief, Jah)';
             } catch (err) {
-                statusEl.textContent = '⚠ Failed to load catalog: ' + err.message + '. Using built-in database.';
+                document.getElementById('catalogLoading').style.display = 'none';
+                const wrap = document.getElementById('searchWrap');
+                wrap.classList.remove('hidden');
+                wrap.classList.add('reveal');
+                statusEl.style.display = 'block';
+                statusEl.textContent = '⚠ ' + err.message + '. Using built-in database (' + ITEMS.length + ' items).';
                 statusEl.className = 'error';
-                searchEl.disabled = false;
-                // Keep RUNES as fallback
+                // Keep RUNES + ROTW as fallback
             }
         }
 
