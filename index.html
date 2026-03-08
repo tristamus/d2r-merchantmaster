@@ -621,12 +621,13 @@
                     }
                 } catch (e) { /* rune page fetch failed, use static runes */ }
 
-                // Build full item list
+                // Build full item list (store item_id for API fallback)
                 const dynamicItems = prices.map(item => ({
                     n: item.item_name,
                     c: item.item_quality || 'unique',
                     p: item.item_slug.replace(/^\//, ''), // remove leading slash
                     a: ALIASES[item.item_name] || undefined,
+                    iid: item.item_id || undefined,
                 }));
 
                 // Add runes from rune-prices page if available
@@ -635,6 +636,7 @@
                         n: r.item_name,
                         c: 'rune',
                         p: r.item_slug.replace(/^\//, ''),
+                        iid: r.item_id || undefined,
                     }));
                     ITEMS = [...ROTW_ITEMS, ...runeDb, ...dynamicItems];
                 } else {
@@ -660,33 +662,54 @@
             }
         }
 
-        // ── PRICE FETCHING ──
-        async function fetchPagePrice(itemPath) {
-            const html = await fetchWithProxy(BASE + itemPath);
-            const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-            if (!m) throw new Error('Could not find price data');
-            const data = JSON.parse(m[1]);
-            const pp = data.props?.pageProps;
-            if (!pp) throw new Error('No page props');
-            // Direct path: pageProps.page.item_price.fg
-            const fg = pp.page?.item_price?.fg;
+        // ── PRICE FETCHING (3-layer fallback) ──
+        // Helper: try d2trader API for a given item_id and ladder setting
+        async function tryApiPrice(itemId, ladder) {
+            const apiUrl = 'https://api.d2trader.net/v3/price?item_id=' + itemId +
+                '&upload_id=null&attr_ids=null&mode=softcore&platform=pc&ladder=' + (ladder ? '1' : '0');
+            const apiText = await fetchWithProxy(apiUrl);
+            const apiData = JSON.parse(apiText);
+            const fg = apiData.item_price?.fg;
             if (fg && (fg.min != null || fg.low != null)) {
                 return { min: +(fg.min ?? fg.low), max: +(fg.max ?? fg.high) };
             }
-            // Fallback: use the API with the item's hash ID
-            const itemId = pp.page?.item_details?.item_id;
+            return null;
+        }
+
+        async function fetchPagePrice(itemPath, item) {
+            // Layer 1: Real-time page scrape + API (non-ladder)
+            let itemId = item?.iid;
+            try {
+                const html = await fetchWithProxy(BASE + itemPath);
+                const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+                if (m) {
+                    const data = JSON.parse(m[1]);
+                    const pp = data.props?.pageProps;
+                    const fg = pp?.page?.item_price?.fg;
+                    if (fg && (fg.min != null || fg.low != null)) {
+                        return { min: +(fg.min ?? fg.low), max: +(fg.max ?? fg.high), fallback: null };
+                    }
+                    // Grab item_id from page if we don't have it
+                    if (!itemId) itemId = pp?.page?.item_details?.item_id;
+                }
+            } catch (e) { /* page scrape failed, try API */ }
+
+            // Try API with item_id (non-ladder)
             if (itemId) {
                 try {
-                    const apiUrl = 'https://api.d2trader.net/v3/price?item_id=' + itemId +
-                        '&upload_id=null&attr_ids=null&mode=softcore&platform=pc&ladder=0';
-                    const apiText = await fetchWithProxy(apiUrl);
-                    const apiData = JSON.parse(apiText);
-                    if (apiData.fg && (apiData.fg.min != null || apiData.fg.low != null)) {
-                        return { min: +(apiData.fg.min ?? apiData.fg.low), max: +(apiData.fg.max ?? apiData.fg.high) };
-                    }
-                } catch (e) { /* API fallback failed */ }
+                    const result = await tryApiPrice(itemId, false);
+                    if (result) return { ...result, fallback: null };
+                } catch (e) { /* non-ladder API failed */ }
+
+                // Layer 2: Ladder price as proxy
+                try {
+                    const result = await tryApiPrice(itemId, true);
+                    if (result) return { ...result, fallback: 'ladder' };
+                } catch (e) { /* ladder API failed */ }
             }
-            throw new Error('Price unavailable — low trade volume on non-ladder');
+
+            // No price found through any live source
+            throw new Error('Price unavailable — low trade volume');
         }
 
         function formatRune(val, name) {
@@ -706,25 +729,42 @@
                 const istItem = ITEMS.find(i => i.n === 'Ist Rune');
                 if (!jahItem || !istItem) throw new Error('Rune reference data not available');
 
-                let itemPrice, jahPrice, istPrice, source;
+                let itemPrice, jahPrice, istPrice, source, fallbackType = null;
 
                 if (item.fg) {
                     // D2JSP embedded price — only fetch rune prices from d2trader
-                    itemPrice = item.fg;
+                    itemPrice = { ...item.fg, fallback: null };
                     source = 'd2jsp';
                     [jahPrice, istPrice] = await Promise.all([
-                        fetchPagePrice(jahItem.p),
-                        fetchPagePrice(istItem.p)
+                        fetchPagePrice(jahItem.p, jahItem),
+                        fetchPagePrice(istItem.p, istItem)
                     ]);
                 } else {
                     // D2trader.net price — fetch all three
                     source = 'd2trader';
-                    [itemPrice, jahPrice, istPrice] = await Promise.all([
-                        fetchPagePrice(item.p),
-                        fetchPagePrice(jahItem.p),
-                        fetchPagePrice(istItem.p)
-                    ]);
+                    try {
+                        [itemPrice, jahPrice, istPrice] = await Promise.all([
+                            fetchPagePrice(item.p, item),
+                            fetchPagePrice(jahItem.p, jahItem),
+                            fetchPagePrice(istItem.p, istItem)
+                        ]);
+                    } catch (fetchErr) {
+                        // Layer 3: embedded FG fallback — use item's embedded fg data if available
+                        if (item.fg) {
+                            itemPrice = { ...item.fg, fallback: 'embedded' };
+                            source = 'd2jsp';
+                            [jahPrice, istPrice] = await Promise.all([
+                                fetchPagePrice(jahItem.p, jahItem),
+                                fetchPagePrice(istItem.p, istItem)
+                            ]);
+                        } else {
+                            throw fetchErr; // No fallback available
+                        }
+                    }
                 }
+
+                // Track fallback type from item price
+                fallbackType = itemPrice.fallback || null;
 
                 // Median (midpoint of min/max)
                 const itemMed = (itemPrice.min + itemPrice.max) / 2;
@@ -733,7 +773,7 @@
                 // Median rune values
                 const inJah = jahMed > 0 ? itemMed / jahMed : 0;
                 const inIst = istMed > 0 ? itemMed / istMed : 0;
-                // Range rune values (low-end item / high-end rune, high-end item / low-end rune)
+                // Range rune values
                 const istLow = istMed > 0 ? itemPrice.min / istMed : 0;
                 const istHigh = istMed > 0 ? itemPrice.max / istMed : 0;
                 const jahLow = jahMed > 0 ? itemPrice.min / jahMed : 0;
@@ -752,13 +792,21 @@
                 const istRange = istLow === istHigh ? fmtR(istLow) : fmtR(istLow) + ' – ' + fmtR(istHigh);
                 const jahRange = jahLow === jahHigh ? fmtR(jahLow) : fmtR(jahLow) + ' – ' + fmtR(jahHigh);
                 const fgRange = itemPrice.min === itemPrice.max ? itemPrice.min + ' FG' : itemPrice.min + ' – ' + itemPrice.max + ' FG';
-                const srcBadge = source === 'd2jsp'
-                    ? '<div style="text-align:center;margin-top:6px;font-size:0.65rem;color:#a09880;letter-spacing:1px">📊 FG range from d2jsp trades · Rune rates from d2trader.net</div>'
-                    : '';
+
+                // Build source badge based on fallback type
+                let srcBadge = '';
+                if (fallbackType === 'ladder') {
+                    srcBadge = '<div style="text-align:center;margin-top:8px;padding:6px 12px;border-radius:8px;background:rgba(78,205,196,0.08);border:1px solid rgba(78,205,196,0.2);font-size:0.7rem;color:#4ecdc4;letter-spacing:0.5px">⚡ Ladder price shown — non-ladder data unavailable</div>';
+                } else if (fallbackType === 'embedded') {
+                    srcBadge = '<div style="text-align:center;margin-top:8px;padding:6px 12px;border-radius:8px;background:rgba(255,180,60,0.08);border:1px solid rgba(255,180,60,0.2);font-size:0.7rem;color:#ffb43c;letter-spacing:0.5px">📊 Estimated from recent d2jsp trades</div>';
+                } else if (source === 'd2jsp') {
+                    srcBadge = '<div style="text-align:center;margin-top:6px;font-size:0.65rem;color:#a09880;letter-spacing:1px">📊 FG range from d2jsp trades · Rune rates from d2trader.net</div>';
+                }
+
                 card.innerHTML = `
       <div class="item-header">
         <div class="item-name">${item.n}</div>
-        <div class="item-type">${item.c}${source === 'd2jsp' ? ' · <span style="color:#f0c060">Season 9</span>' : ''}</div>
+        <div class="item-type">${item.c}${source === 'd2jsp' ? ' · <span style="color:#f0c060">Season 9</span>' : ''}${fallbackType ? ' · <span style="color:#ffb43c">Estimated</span>' : ''}</div>
       </div>
       <div class="primary-rune">
         <div class="price-label">${primaryLabel}</div>
