@@ -480,9 +480,9 @@
     <script>
         // ── CORS PROXIES (fallback chain) ──
         const PROXIES = [
-            u => 'https://corsproxy.io/?' + encodeURIComponent(u),
             u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
             u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
+            u => 'https://corsproxy.io/?' + encodeURIComponent(u),
         ];
         const BASE = 'https://d2trader.net/';
 
@@ -598,34 +598,47 @@
         // ── DYNAMIC CATALOG ──
         let ITEMS = [...RUNES, ...ROTW_ITEMS]; // Start with runes + Season 9, add d2trader items on load
 
+        // Helper: parse d2trader response (supports new JSON and old HTML formats)
+        function parsePricesFromResponse(text) {
+            // Try raw JSON first (new format)
+            try {
+                const data = JSON.parse(text);
+                if (Array.isArray(data)) return data;
+                // Could be a wrapped JSON object
+                const prices = data.props?.pageProps?.prices;
+                if (prices && Array.isArray(prices)) return prices;
+            } catch (e) { /* not JSON, try HTML */ }
+            // Try HTML with __NEXT_DATA__ (old format)
+            const m = text.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+            if (m) {
+                const data = JSON.parse(m[1]);
+                const prices = data.props?.pageProps?.prices;
+                if (prices && Array.isArray(prices)) return prices;
+            }
+            return null;
+        }
+
         async function loadCatalog() {
             const statusEl = document.getElementById('catalogStatus');
             const searchEl = document.getElementById('searchInput');
             try {
                 const html = await fetchWithProxy(BASE + 'item-prices');
-                const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-                if (!m) throw new Error('Catalog not found');
-                const data = JSON.parse(m[1]);
-                const prices = data.props?.pageProps?.prices;
-                if (!prices || !Array.isArray(prices)) throw new Error('No items in catalog');
+                const prices = parsePricesFromResponse(html);
+                if (!prices) throw new Error('Catalog not found');
 
                 // Also fetch rune-prices page for rune data
                 let runeItems = [];
                 try {
                     const runeHtml = await fetchWithProxy(BASE + 'rune-prices');
-                    const rm = runeHtml.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-                    if (rm) {
-                        const rd = JSON.parse(rm[1]);
-                        const rp = rd.props?.pageProps?.prices;
-                        if (rp && Array.isArray(rp)) runeItems = rp;
-                    }
+                    const rp = parsePricesFromResponse(runeHtml);
+                    if (rp) runeItems = rp;
                 } catch (e) { /* rune page fetch failed, use static runes */ }
 
                 // Build full item list (store item_id for API fallback)
                 const dynamicItems = prices.map(item => ({
                     n: item.item_name,
                     c: item.item_quality || 'unique',
-                    p: item.item_slug.replace(/^\//, ''), // remove leading slash
+                    p: (item.item_slug || '').replace(/^\//, ''), // remove leading slash
                     a: ALIASES[item.item_name] || undefined,
                     iid: item.item_id || undefined,
                 }));
@@ -635,7 +648,7 @@
                     const runeDb = runeItems.map(r => ({
                         n: r.item_name,
                         c: 'rune',
-                        p: r.item_slug.replace(/^\//, ''),
+                        p: (r.item_slug || '').replace(/^\//, ''),
                         iid: r.item_id || undefined,
                     }));
                     ITEMS = [...ROTW_ITEMS, ...runeDb, ...dynamicItems];
@@ -681,16 +694,27 @@
             let itemId = item?.iid;
             try {
                 const html = await fetchWithProxy(BASE + itemPath);
-                const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-                if (m) {
-                    const data = JSON.parse(m[1]);
-                    const pp = data.props?.pageProps;
-                    const fg = pp?.page?.item_price?.fg;
-                    if (fg && (fg.min != null || fg.low != null)) {
-                        return { min: +(fg.min ?? fg.low), max: +(fg.max ?? fg.high), fallback: null };
+                // Try JSON first (new format)
+                let fg = null;
+                try {
+                    const data = JSON.parse(html);
+                    // New format: could be object with item_price, or wrapped in props
+                    const pp = data.props?.pageProps || data;
+                    fg = pp?.page?.item_price?.fg || pp?.item_price?.fg || data?.item_price?.fg;
+                    if (!itemId) itemId = pp?.page?.item_details?.item_id || pp?.item_details?.item_id || data?.item_id;
+                } catch (e) { /* not JSON, try HTML */ }
+                // Fallback: HTML with __NEXT_DATA__ (old format)
+                if (!fg) {
+                    const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+                    if (m) {
+                        const data = JSON.parse(m[1]);
+                        const pp = data.props?.pageProps;
+                        fg = pp?.page?.item_price?.fg;
+                        if (!itemId) itemId = pp?.page?.item_details?.item_id;
                     }
-                    // Grab item_id from page if we don't have it
-                    if (!itemId) itemId = pp?.page?.item_details?.item_id;
+                }
+                if (fg && (fg.min != null || fg.low != null)) {
+                    return { min: +(fg.min ?? fg.low), max: +(fg.max ?? fg.high), fallback: null };
                 }
             } catch (e) { /* page scrape failed, try API */ }
 
