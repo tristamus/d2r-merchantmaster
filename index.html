@@ -5,7 +5,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gheed's Price Checker — Item Value Checker</title>
-    <meta name="description" content="Check D2R item values in Ist and Jah runes using real-time forum gold prices">
+    <meta name="description" content="Gheed's Price Checker is the ultimate Diablo II: Resurrected item value calculator. Check D2R item values in Ist and Jah runes using real-time forum gold prices sourced from accurate d2trader and d2jsp market data.">
+    <meta property="og:title" content="Gheed's Price Checker — D2R Item Value Checker">
+    <meta property="og:description" content="Calculate Diablo II: Resurrected item values in Ist and Jah runes using real-time forum gold prices.">
+    <meta property="og:type" content="website">
+    <meta property="og:url" content="https://d2rmerchantmaster.io">
+    <meta property="og:image" content="https://d2rmerchantmaster.io/og-image.jpg">
     <link
         href="https://fonts.googleapis.com/css2?family=Cinzel:wght@400;700;900&family=Inter:wght@300;400;500;600&display=swap"
         rel="stylesheet">
@@ -625,6 +630,7 @@
         }
     </style>
     <script src="prices.js" onerror="console.log('Bot prices not found, falling back to local defaults.')"></script>
+    <script src="catalog.js" onerror="console.log('Catalog list not found, minimal base loaded.')"></script>
 </head>
 
 <body>
@@ -784,7 +790,8 @@
         ];
 
         // ── STATIC CATALOG ──
-        let ITEMS = [...RUNES, ...FALLBACK_ITEMS];
+        const catalogBase = window.D2TRADER_FULL_CATALOG || RUNES;
+        let ITEMS = [...catalogBase, ...FALLBACK_ITEMS];
         // Deduplicate by name
         ITEMS = [...new Map(ITEMS.map(i => [i.n, i])).values()];
 
@@ -811,8 +818,58 @@
                 return { ...item.fg, fallback: 'embedded' };
             }
 
-            // No price found
-            throw new Error('Price currently unavailable for this item');
+            // Third: Check localStorage for recent live fetch (< 24 hrs)
+            const cacheKey = 'd2r_price_' + itemPath;
+            const cached = localStorage.getItem(cacheKey);
+            let staleData = null;
+            if (cached) {
+                try {
+                    const parsed = JSON.parse(cached);
+                    if (Date.now() - parsed.ts < 24 * 60 * 60 * 1000) {
+                        return { min: parsed.min, max: parsed.max, fallback: 'live_proxy' };
+                    }
+                    // It's stale, keep it just in case live fetch fails
+                    staleData = { min: parsed.min, max: parsed.max, fallback: 'stale_cache' };
+                } catch(e) {}
+            }
+
+            // Fourth: Attempt live fetch via proxy
+            try {
+                const pRes = await fetch('https://api.allorigins.win/raw?url=' + encodeURIComponent('https://d2trader.net/' + itemPath));
+                if (!pRes.ok) throw new Error('Proxy HTTP ' + pRes.status);
+                const html = await pRes.text();
+                
+                // Parse Next.js JSON
+                const m = html.match(/<script id="__NEXT_DATA__"[^>]*>(.*?)<\/script>/);
+                if (m) {
+                    const data = JSON.parse(m[1]);
+                    const pp = data.props?.pageProps || {};
+                    let fg = pp.page?.item_price?.fg || pp.item_price?.fg;
+                    if (fg && (fg.min !== undefined || fg.low !== undefined)) {
+                        const min = parseFloat(fg.min || fg.low);
+                        const max = parseFloat(fg.max || fg.high);
+                        localStorage.setItem(cacheKey, JSON.stringify({ min, max, ts: Date.now() }));
+                        return { min, max, fallback: 'live_proxy' };
+                    }
+                }
+                
+                // Regex fallback
+                const rx = />([\d\.]+)\s*-\s*([\d\.]+)\s*(?:FG|Forum Gold)/i;
+                const m2 = html.match(rx);
+                if (m2) {
+                    const min = parseFloat(m2[1]);
+                    const max = parseFloat(m2[2]);
+                    localStorage.setItem(cacheKey, JSON.stringify({ min, max, ts: Date.now() }));
+                    return { min, max, fallback: 'live_proxy' };
+                }
+                throw new Error('Could not parse price from page');
+            } catch (err) {
+                if (staleData) {
+                    console.warn(`Live fetch failed for ${item.n}, using stale cache.`, err);
+                    return staleData;
+                }
+                throw new Error('Price currently unavailable for this item. Proxy timed out and no last known value exists.');
+            }
         }
 
         function formatRune(val, name) {
@@ -884,6 +941,10 @@
                     srcBadge = '<div style="text-align:center;margin-top:8px;padding:6px 12px;border-radius:8px;background:rgba(78,205,196,0.08);border:1px solid rgba(78,205,196,0.2);font-size:0.7rem;color:#4ecdc4;letter-spacing:0.5px">⚡ Ladder price shown — non-ladder data unavailable</div>';
                 } else if (fallbackType === 'embedded') {
                     srcBadge = '<div style="text-align:center;margin-top:8px;padding:6px 12px;border-radius:8px;background:rgba(255,180,60,0.08);border:1px solid rgba(255,180,60,0.2);font-size:0.7rem;color:#ffb43c;letter-spacing:0.5px">📊 Estimated from recent d2jsp trades</div>';
+                } else if (fallbackType === 'live_proxy') {
+                    srcBadge = '<div style="text-align:center;margin-top:8px;padding:6px 12px;border-radius:8px;background:rgba(0, 150, 255, 0.08);border:1px solid rgba(0, 150, 255, 0.2);font-size:0.7rem;color:#66b3ff;letter-spacing:0.5px">🌐 Fetched live via d2trader proxy</div>';
+                } else if (fallbackType === 'stale_cache') {
+                    srcBadge = '<div style="text-align:center;margin-top:8px;padding:6px 12px;border-radius:8px;background:rgba(255, 100, 100, 0.08);border:1px solid rgba(255, 100, 100, 0.2);font-size:0.7rem;color:#ff6b6b;letter-spacing:0.5px">⏳ Showing last known value from browser cache</div>';
                 } else if (source === 'd2jsp') {
                     srcBadge = '<div style="text-align:center;margin-top:6px;font-size:0.65rem;color:#a09880;letter-spacing:1px">📊 FG range from d2jsp trades · Rune rates from d2trader.net</div>';
                 }
