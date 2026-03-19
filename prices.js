@@ -1,0 +1,1 @@
+window.D2TRADER_CACHED_PRICES = null;
