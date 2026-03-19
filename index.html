@@ -784,7 +784,7 @@
         ];
 
         // ── STATIC CATALOG ──
-        let ITEMS = [...FALLBACK_ITEMS, ...RUNES];
+        let ITEMS = [...RUNES, ...FALLBACK_ITEMS];
         // Deduplicate by name
         ITEMS = [...new Map(ITEMS.map(i => [i.n, i])).values()];
 
