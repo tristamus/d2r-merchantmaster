@@ -652,51 +652,7 @@
         <footer id="footerInfo">Prices sourced from d2trader.net (d2jsp FG) · Updated in real-time</footer>
     </div>
     <script>
-        // ── CORS PROXIES (fallback chain) ──
-        const PROXIES = [
-            u => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(u),
-            u => 'https://api.codetabs.com/v1/proxy?quest=' + encodeURIComponent(u),
-            u => 'https://corsproxy.io/?' + encodeURIComponent(u),
-        ];
         const BASE = 'https://d2trader.net/';
-
-        async function fetchWithProxy(targetUrl) {
-            return new Promise((resolve, reject) => {
-                let errors = 0;
-                let resolved = false;
-                const timeoutId = setTimeout(() => {
-                    if (!resolved) {
-                        resolved = true;
-                        reject(new Error('Proxy timeout'));
-                    }
-                }, 4000);
-
-                for (const mkUrl of PROXIES) {
-                    fetch(mkUrl(targetUrl))
-                        .then(async resp => {
-                            if (resolved) return;
-                            if (!resp.ok) throw new Error('HTTP ' + resp.status);
-                            const text = await resp.text();
-                            if (resolved) return;
-                            if (text.includes('<title>Attention Required! | Cloudflare</title>') || text.includes('403 Forbidden')) {
-                                throw new Error('Blocked by target');
-                            }
-                            resolved = true;
-                            clearTimeout(timeoutId);
-                            resolve(text);
-                        })
-                        .catch(err => {
-                            if (resolved) return;
-                            errors++;
-                            if (errors === PROXIES.length) {
-                                resolved = true;
-                                clearTimeout(timeoutId);
-                                reject(new Error('All proxies failed'));
-                            }
-                        });
-                }
-            });
-        }
 
         // ── STATIC RUNES (different URL pattern than items) ──
         const RUNE_NAMES = ['El', 'Eld', 'Tir', 'Nef', 'Eth', 'Ith', 'Tal', 'Ral', 'Ort', 'Thul', 'Amn', 'Sol', 'Shael', 'Dol', 'Hel', 'Io', 'Lum', 'Ko', 'Fal', 'Lem', 'Pul', 'Um', 'Mal', 'Ist', 'Gul', 'Vex', 'Ohm', 'Lo', 'Sur', 'Ber', 'Jah', 'Cham', 'Zod'];
@@ -827,178 +783,36 @@
             { n: "Sur Rune", c: "rune", fg: { min: 25, max: 28 }, src: "d2jsp", p: "rune/sur-price" }
         ];
 
-        // ── DYNAMIC CATALOG ──
-        let ITEMS = [...RUNES, ...FALLBACK_ITEMS]; // Start with runes + Top Fallbacks, add d2trader items on load
-
-        // Helper: parse d2trader response
-        function parsePricesFromResponse(text) {
-            try {
-                const data = JSON.parse(text);
-                if (Array.isArray(data)) return data;
-                const prices = data.props?.pageProps?.prices;
-                if (prices && Array.isArray(prices)) return prices;
-            } catch (e) { }
-            const m = text.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-            if (m) {
-                const data = JSON.parse(m[1]);
-                const prices = data.props?.pageProps?.prices;
-                if (prices && Array.isArray(prices)) return prices;
-            }
-            return null;
-        }
-
-        // ── CACHED FETCHING ──
-        async function fetchWithCache(url, cacheKey, ttlSeconds = 3600) {
-            const cached = localStorage.getItem(cacheKey);
-            if (cached) {
-                const parsed = JSON.parse(cached);
-                if (Date.now() - parsed.timestamp < ttlSeconds * 1000) {
-                    return parsed.data; // Return cached string
-                }
-            }
-            // If absent or expired, fetch real data
-            const txt = await fetchWithProxy(url);
-            localStorage.setItem(cacheKey, JSON.stringify({
-                timestamp: Date.now(),
-                data: txt
-            }));
-            return txt;
-        }
+        // ── STATIC CATALOG ──
+        let ITEMS = [...FALLBACK_ITEMS, ...RUNES];
+        // Deduplicate by name
+        ITEMS = [...new Map(ITEMS.map(i => [i.n, i])).values()];
 
         async function loadCatalog() {
             const statusEl = document.getElementById('catalogStatus');
-            const searchEl = document.getElementById('searchInput');
-            try {
-                // Background fetch with 24-hour cache for catalog
-                const html = await fetchWithCache(BASE + 'item-prices', 'd2r_catalog', 86400);
-                const prices = parsePricesFromResponse(html);
-                if (!prices) throw new Error('Catalog format invalid');
-
-                let runeItems = [];
-                try {
-                    const runeHtml = await fetchWithCache(BASE + 'rune-prices', 'd2r_runes_catalog', 86400);
-                    const rp = parsePricesFromResponse(runeHtml);
-                    if (rp) runeItems = rp;
-                } catch (e) { }
-
-                const dynamicItems = prices.map(item => ({
-                    n: item.item_name,
-                    c: item.item_quality || 'unique',
-                    p: (item.item_slug || '').replace(/^\//, ''),
-                    a: ALIASES[item.item_name] || undefined,
-                    iid: item.item_id || undefined,
-                }));
-
-                if (runeItems.length > 0) {
-                    const runeDb = runeItems.map(r => ({
-                        n: r.item_name,
-                        c: 'rune',
-                        p: (r.item_slug || '').replace(/^\//, ''),
-                        iid: r.item_id || undefined,
-                    }));
-                    // Merge, allowing dynamic items to overwrite fallbacks if needed, but fallbacks loaded first
-                    ITEMS = [...FALLBACK_ITEMS, ...runeDb, ...dynamicItems];
-                } else {
-                    ITEMS = [...FALLBACK_ITEMS, ...RUNES, ...dynamicItems];
-                }
-
-                // Deduplicate by name
-                ITEMS = [...new Map(ITEMS.map(i => [i.n, i])).values()];
-
-                document.getElementById('catalogLoading').style.display = 'none';
-                const wrap = document.getElementById('searchWrap');
-                wrap.classList.remove('hidden');
-                wrap.classList.add('reveal');
-                statusEl.style.display = 'block';
-                statusEl.textContent = ITEMS.length + ' items loaded (Live Sync)';
-                setTimeout(() => statusEl.style.opacity = '0', 3000);
-            } catch (err) {
-                document.getElementById('catalogLoading').style.display = 'none';
-                const wrap = document.getElementById('searchWrap');
-                wrap.classList.remove('hidden');
-                wrap.classList.add('reveal');
-                statusEl.style.display = 'block';
-                statusEl.textContent = '⚠ Network issue. Offline Mode (' + ITEMS.length + ' items available).';
-                statusEl.className = 'error';
-                window.OFFLINE_MODE = true;
-            }
+            document.getElementById('catalogLoading').style.display = 'none';
+            const wrap = document.getElementById('searchWrap');
+            wrap.classList.remove('hidden');
+            wrap.classList.add('reveal');
+            statusEl.style.display = 'block';
+            statusEl.textContent = ITEMS.length + ' base items loaded';
+            setTimeout(() => statusEl.style.opacity = '0', 3000);
         }
 
-        // ── PRICE FETCHING (3-layer fallback) ──
-        // Helper: try d2trader API for a given item_id and ladder setting
-        async function tryApiPrice(itemId, ladder) {
-            const apiUrl = 'https://api.d2trader.net/v3/price?item_id=' + itemId +
-                '&upload_id=null&attr_ids=null&mode=softcore&platform=pc&ladder=' + (ladder ? '1' : '0');
-            const apiText = await fetchWithCache(apiUrl, 'd2r_api_' + itemId + '_' + (ladder ? 'l' : 'nl'), 3600);
-            const apiData = JSON.parse(apiText);
-            const fg = apiData.item_price?.fg;
-            if (fg && (fg.min != null || fg.low != null)) {
-                return { min: +(fg.min ?? fg.low), max: +(fg.max ?? fg.high) };
-            }
-            return null;
-        }
-
+        // ── PRICE FETCHING ──
         async function fetchPagePrice(itemPath, item) {
-            // Bypass fetch loop completely if our Github Action bot scraped this item today
+            // First: check if our Github Action bot scraped this item today
             if (item && window.D2TRADER_CACHED_PRICES && window.D2TRADER_CACHED_PRICES[item.n]) {
                 return { ...window.D2TRADER_CACHED_PRICES[item.n], fallback: 'verified_bot' };
             }
 
-            // Fast-fail in offline mode
-            if (window.OFFLINE_MODE) {
-                if (item && item.fg) return { ...item.fg, fallback: 'embedded' };
-                throw new Error('Price unavailable in offline mode');
-            }
-
-            // Layer 1: Real-time page scrape + API (non-ladder)
-            let itemId = item?.iid;
-            try {
-                const html = await fetchWithCache(BASE + itemPath, 'd2r_page_' + itemPath, 3600);
-                // Try JSON first (new format)
-                let fg = null;
-                try {
-                    const data = JSON.parse(html);
-                    // New format: could be object with item_price, or wrapped in props
-                    const pp = data.props?.pageProps || data;
-                    fg = pp?.page?.item_price?.fg || pp?.item_price?.fg || data?.item_price?.fg;
-                    if (!itemId) itemId = pp?.page?.item_details?.item_id || pp?.item_details?.item_id || data?.item_id;
-                } catch (e) { /* not JSON, try HTML */ }
-                // Fallback: HTML with __NEXT_DATA__ (old format)
-                if (!fg) {
-                    const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
-                    if (m) {
-                        const data = JSON.parse(m[1]);
-                        const pp = data.props?.pageProps;
-                        fg = pp?.page?.item_price?.fg;
-                        if (!itemId) itemId = pp?.page?.item_details?.item_id;
-                    }
-                }
-                if (fg && (fg.min != null || fg.low != null)) {
-                    return { min: +(fg.min ?? fg.low), max: +(fg.max ?? fg.high), fallback: null };
-                }
-            } catch (e) { /* page scrape failed, try API */ }
-
-            // Try API with item_id (non-ladder)
-            if (itemId) {
-                try {
-                    const result = await tryApiPrice(itemId, false);
-                    if (result) return { ...result, fallback: null };
-                } catch (e) { /* non-ladder API failed */ }
-
-                // Layer 2: Ladder price as proxy
-                try {
-                    const result = await tryApiPrice(itemId, true);
-                    if (result) return { ...result, fallback: 'ladder' };
-                } catch (e) { /* ladder API failed */ }
-            }
-
-            // Layer 3: Local fallback data embedded in item
+            // Second: Local fallback data embedded in item
             if (item && item.fg) {
                 return { ...item.fg, fallback: 'embedded' };
             }
 
-            // No price found through any live source
-            throw new Error('Price unavailable — low trade volume');
+            // No price found
+            throw new Error('Price currently unavailable for this item');
         }
 
         function formatRune(val, name) {
@@ -1020,36 +834,16 @@
 
                 let itemPrice, jahPrice, istPrice, source, fallbackType = null;
 
-                if (item.fg) {
-                    // D2JSP embedded price — only fetch rune prices from d2trader
-                    itemPrice = { ...item.fg, fallback: null };
+                [itemPrice, jahPrice, istPrice] = await Promise.all([
+                    fetchPagePrice(item.p, item),
+                    fetchPagePrice(jahItem.p, jahItem),
+                    fetchPagePrice(istItem.p, istItem)
+                ]);
+
+                if (itemPrice.fallback === 'embedded') {
                     source = 'd2jsp';
-                    [jahPrice, istPrice] = await Promise.all([
-                        fetchPagePrice(jahItem.p, jahItem),
-                        fetchPagePrice(istItem.p, istItem)
-                    ]);
                 } else {
-                    // D2trader.net price — fetch all three
                     source = 'd2trader';
-                    try {
-                        [itemPrice, jahPrice, istPrice] = await Promise.all([
-                            fetchPagePrice(item.p, item),
-                            fetchPagePrice(jahItem.p, jahItem),
-                            fetchPagePrice(istItem.p, istItem)
-                        ]);
-                    } catch (fetchErr) {
-                        // Layer 3: embedded FG fallback — use item's embedded fg data if available
-                        if (item.fg) {
-                            itemPrice = { ...item.fg, fallback: 'embedded' };
-                            source = 'd2jsp';
-                            [jahPrice, istPrice] = await Promise.all([
-                                fetchPagePrice(jahItem.p, jahItem),
-                                fetchPagePrice(istItem.p, istItem)
-                            ]);
-                        } else {
-                            throw fetchErr; // No fallback available
-                        }
-                    }
                 }
 
                 // Track fallback type from item price
